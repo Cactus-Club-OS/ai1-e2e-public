@@ -1,0 +1,87 @@
+# CI: the automatic checks every pull request must pass.
+# The two job names ("guards" and "test") are the required checks in the branch ruleset.
+# Rename them in both places or neither.
+#
+# The automation's GitHub App has no "workflows" permission, so it cannot add or change this file.
+# The repository owner adds it once, in the browser, and later changes need a human code owner
+# (see .github/CODEOWNERS): a pull request runs its own copy of this workflow, so whoever edits it
+# could otherwise switch the checks off.
+#
+# GitHub Enterprise Server: replace "ubuntu-latest" with the label of your CI runners.
+# Tip: pin each action to a full commit SHA instead of a version tag.
+
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guards:
+    name: guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Hold guard (labels and title)
+        if: github.event_name == 'pull_request'
+        env:
+          # Passed through env, never pasted into the script: titles are untrusted input.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: bash scripts/ci/hold-guard.sh
+
+      - name: Forbidden files (secrets, keys, env files)
+        run: bash scripts/ci/forbidden-files.sh
+
+      - name: Dependency sources (supply-chain guard)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/dependency-sources.sh
+
+      - name: Gate-change notice
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/gate-change-notice.sh
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        if: hashFiles('package.json') != ''
+        with:
+          node-version-file: .node-version
+
+      - name: Install
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        if: hashFiles('package.json') != ''
+        run: npm run lint --if-present
+
+      - name: Test
+        if: hashFiles('package.json') != ''
+        run: npm test --if-present
+
+      - name: Build
+        if: hashFiles('package.json') != ''
+        run: npm run build --if-present
